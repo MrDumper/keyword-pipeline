@@ -1,0 +1,31 @@
+# venv / кэш / IDE
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.idea/
+.vscode/
+
+# локальные ключи и конфиги
+.env
+.env.*
+.envrc
+*.secret*
+**/keys.json
+*.key
+*.pem
+# наш конфиг-кошелёк
+/Users/*/.config/keyword_pipeline/keys.json
+.config/keyword_pipeline/keys.json
+./keys.json
+
+# артефакты пайплайна
+*_results.csv
+niche_competitors_keyapp*.csv
+*competitors*.csv
+runs/
+logs/
+*.log
+
+# системы
+.DS_Store
