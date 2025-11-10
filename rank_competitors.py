@@ -141,9 +141,10 @@ def main():
         audit = audit.rename(columns={"конкурент_url": "конкурент"})
 
     if "конкурент" in audit.columns and "конкурент_url" in audit.columns:
-        audit["конкурент"].fillna("", inplace=True)
+        audit["конкурент"] = audit["конкурент"].fillna("")
+        audit["конкурент_url"] = audit["конкурент_url"].fillna("")
         mask_empty = audit["конкурент"].astype(str).str.strip().eq("")
-        audit.loc[mask_empty, "конкурент"] = audit.loc[mask_empty, "конкурент_url"].fillna("")
+        audit.loc[mask_empty, "конкурент"] = audit.loc[mask_empty, "конкурент_url"]
 
     # ограничим страны из аудита теми, что выбраны
     include_titles = {get_country_title(cc) for cc in countries}
@@ -186,6 +187,7 @@ def main():
 
     if "конкурент" in merged.columns:
         competitor_series = merged["конкурент"].fillna("").astype(str).str.strip()
+        merged["конкурент"] = competitor_series
     else:
         competitor_series = pd.Series([""] * len(merged), index=merged.index)
     has_comp = competitor_series != ""
