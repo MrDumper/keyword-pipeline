@@ -13,6 +13,16 @@ from brands_catalog import (
     canonicalize,
 )
 
+OUTPUT_COLUMNS = [
+    "ключ",
+    "конкурент",
+    "конкурент в бане",
+    "инстайлы в день",
+    "Юзаный",
+    "страна",
+    "объем запросов",
+]
+
 # -------------------- helpers --------------------
 
 def _norm_basic(s: str) -> str:
@@ -114,19 +124,32 @@ def main():
     # аудит
     audit = pd.read_csv(args.audit)
     if audit.empty:
-        pd.DataFrame(columns=["ключ", "конкурент", "Юзаный", "страна", "search_volume"]).to_csv(
-            args.out, index=False, encoding="utf-8-sig"
-        )
+        pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(args.out, index=False, encoding="utf-8-sig")
         print(f"Saved: {args.out} (empty audit)")
         return
+
+    rename_map = {}
+    if "installs_daily" in audit.columns and "инстайлы в день" not in audit.columns:
+        rename_map["installs_daily"] = "инстайлы в день"
+    if "конкурент_забанен" in audit.columns and "конкурент в бане" not in audit.columns:
+        rename_map["конкурент_забанен"] = "конкурент в бане"
+    if rename_map:
+        audit = audit.rename(columns=rename_map)
+
+    # если конкурент пустой, попробуем подставить URL/ID
+    if "конкурент" not in audit.columns and "конкурент_url" in audit.columns:
+        audit = audit.rename(columns={"конкурент_url": "конкурент"})
+
+    if "конкурент" in audit.columns and "конкурент_url" in audit.columns:
+        audit["конкурент"].fillna("", inplace=True)
+        mask_empty = audit["конкурент"].astype(str).str.strip().eq("")
+        audit.loc[mask_empty, "конкурент"] = audit.loc[mask_empty, "конкурент_url"].fillna("")
 
     # ограничим страны из аудита теми, что выбраны
     include_titles = {get_country_title(cc) for cc in countries}
     audit = audit[audit["страна"].isin(include_titles)].copy()
     if audit.empty:
-        pd.DataFrame(columns=["ключ", "конкурент", "Юзаный", "страна", "search_volume"]).to_csv(
-            args.out, index=False, encoding="utf-8-sig"
-        )
+        pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(args.out, index=False, encoding="utf-8-sig")
         print(f"Saved: {args.out} (no rows for selected country)")
         return
 
@@ -147,11 +170,25 @@ def main():
     merged = audit.merge(vol, on="canon", how="left")
     merged["search_volume"] = pd.to_numeric(merged.get("search_volume"), errors="coerce").fillna(0)
 
+    if "инстайлы в день" in merged.columns:
+        merged["инстайлы в день"] = pd.to_numeric(merged["инстайлы в день"], errors="coerce")
+        merged["инстайлы в день"] = merged["инстайлы в день"].round().astype("Int64")
+
+    if "конкурент в бане" in merged.columns:
+        merged["конкурент в бане"] = merged["конкурент в бане"].map(
+            lambda v: "Да" if str(v).strip().lower() in {"да", "true", "1"}
+            else ("Нет" if str(v).strip().lower() in {"нет", "false", "0"} else "")
+        )
+
     # базовые фильтры
     if args.only_nonused:
         merged = merged[merged["Юзаный"].astype(str).str.strip().str.lower().eq("нет")].copy()
 
-    has_comp = merged["конкурент"].fillna("-") != "-"
+    if "конкурент" in merged.columns:
+        competitor_series = merged["конкурент"].fillna("").astype(str).str.strip()
+    else:
+        competitor_series = pd.Series([""] * len(merged), index=merged.index)
+    has_comp = competitor_series != ""
 
     cap_upper = args.cap if args.cap is not None else args.cap_upper
     if cap_upper is not None:
@@ -176,8 +213,17 @@ def main():
             .apply(lambda d: d.head(args.top_per_country))
         )
 
-    out_cols = ["ключ", "конкурент", "Юзаный", "страна", "search_volume"]
-    merged[out_cols].to_csv(args.out, index=False, encoding="utf-8-sig")
+    merged["объем запросов"] = merged["search_volume"].round().astype("Int64")
+
+    # гарантируем наличие колонок
+    for col in OUTPUT_COLUMNS:
+        if col not in merged.columns:
+            if col in {"объем запросов", "инстайлы в день"}:
+                merged[col] = pd.Series([pd.NA] * len(merged), dtype="Int64")
+            else:
+                merged[col] = ""
+
+    merged[OUTPUT_COLUMNS].to_csv(args.out, index=False, encoding="utf-8-sig")
     print(f"Saved: {args.out}")
 
 if __name__ == "__main__":

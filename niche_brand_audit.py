@@ -11,8 +11,9 @@ niche_brand_audit.py
 
 Выходной CSV: niche_competitors_keyapp.csv
 Колонки:
-  ключ, конкурент, Юзаный, страна, installs_daily, конкурент_забанен, конкуренты_инсталлы
-где конкуренты_инсталлы = "Title::installs::bannedFlag; ..."
+  ключ, конкурент, конкурент_url, конкурент_app_id, Юзаный, страна,
+  «инстайлы в день», «конкурент в бане», конкуренты_инсталлы
+где конкуренты_инсталлы = "Title::installs::Да/Нет; ..."
 """
 
 import argparse
@@ -86,6 +87,7 @@ def aspy_enrich_cached(app_id, session, ttl_days):
 
 # AppstoreSpy API
 ASPY_BASE = "https://api.appstorespy.com/v1"
+ASPY_STORES = ("googleplay", "google")
 
 def _headers_keyapp(token: str) -> Dict[str,str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -175,6 +177,35 @@ def play_search_candidates(keyword: str, lang: str, country_cc: str, topn: int, 
 
 # ---------- AppstoreSpy helpers ----------
 
+def _aspy_get_json(session: requests.Session, endpoint: str, app_id: str, extra_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    params = extra_params.copy() if extra_params else {}
+    params.setdefault("app_id", app_id)
+    for store in ASPY_STORES:
+        params["store"] = store
+        try:
+            r = session.get(f"{ASPY_BASE}{endpoint}", params=params, timeout=30)
+        except Exception:
+            continue
+
+        if r.status_code == 429:
+            # превышение лимита — вернём пусто, чтобы не стопорить пайплайн
+            return {}
+
+        if r.status_code == 404:
+            # для некоторых регионов store может не работать — пробуем следующий
+            continue
+
+        if r.status_code == 401:
+            # неверный ключ — не имеет смысла продолжать
+            return {}
+
+        if r.ok:
+            try:
+                return r.json() or {}
+            except ValueError:
+                return {}
+    return {}
+
 def _extract_daily_installs_any(data: Dict[str, Any]) -> Optional[float]:
     # Пытаемся вынуть daily installs из разных возможных мест
     candidates = [
@@ -260,41 +291,29 @@ def aspy_enrich(app_id: str, session: requests.Session) -> Dict[str, Any]:
     out = {"daily": None, "banned": None}
 
     # 1) summary
-    try:
-        r = session.get(f"{ASPY_BASE}/apps/summary", params={"store":"google","app_id":app_id}, timeout=30)
-        if r.status_code == 200:
-            data = r.json() or {}
-            out["daily"] = _extract_daily_installs_any(data) if out["daily"] is None else out["daily"]
-            b = _extract_banned_flag(data)
-            if b is not None:
-                out["banned"] = bool(b)
-    except Exception:
-        pass
+    data = _aspy_get_json(session, "/apps/summary", app_id)
+    if data:
+        out["daily"] = _extract_daily_installs_any(data) if out["daily"] is None else out["daily"]
+        b = _extract_banned_flag(data)
+        if b is not None:
+            out["banned"] = bool(b)
 
     # 2) app
-    try:
-        r = session.get(f"{ASPY_BASE}/apps/app", params={"store":"google","app_id":app_id}, timeout=30)
-        if r.status_code == 200:
-            data = r.json() or {}
-            if out["daily"] is None:
-                out["daily"] = _extract_daily_installs_any(data)
-            b = _extract_banned_flag(data)
-            if b is not None:
-                out["banned"] = bool(b)
-    except Exception:
-        pass
+    data = _aspy_get_json(session, "/apps/app", app_id)
+    if data:
+        if out["daily"] is None:
+            out["daily"] = _extract_daily_installs_any(data)
+        b = _extract_banned_flag(data)
+        if b is not None:
+            out["banned"] = bool(b)
 
     # 3) trends (последняя точка)
     if out["daily"] is None:
-        try:
-            r = session.get(f"{ASPY_BASE}/apps/trends", params={"store":"google","app_id":app_id}, timeout=30)
-            if r.status_code == 200:
-                data = r.json() or {}
-                seq = _extract_daily_series_any(data)
-                if seq:
-                    out["daily"] = float(seq[-1])
-        except Exception:
-            pass
+        data = _aspy_get_json(session, "/apps/trends", app_id)
+        if data:
+            seq = _extract_daily_series_any(data)
+            if seq:
+                out["daily"] = float(seq[-1])
 
     return out
 
@@ -342,9 +361,12 @@ def audit_country_all_brands(
             non_null = [x for x in enriched if x["daily"] is not None]
             top = (max(non_null, key=lambda x: x["daily"]) if non_null else enriched[0])
 
-        comp_url = top["url"] if top else "-"
+        comp_title = top["title"] if top else ""
+        comp_url = top["url"] if top else ""
         comp_daily = int(top["daily"]) if (top and isinstance(top["daily"], (int, float))) else ""
-        comp_banned = bool(top["banned"]) if (top and isinstance(top.get("banned"), bool)) else False
+        comp_banned = top.get("banned") if top else None
+        comp_banned = bool(comp_banned) if isinstance(comp_banned, bool) else None
+        comp_app_id = top.get("appId") if top else ""
 
         # 4) сводка кандидатов: "Title::installs::banned"
         bundle = "-"
@@ -352,17 +374,23 @@ def audit_country_all_brands(
             parts = []
             for ci in enriched:
                 di = (int(ci["daily"]) if isinstance(ci["daily"], (int, float)) else "-")
-                bn = "banned" if ci.get("banned") is True else "-"
+                bn_flag = ci.get("banned")
+                if isinstance(bn_flag, bool):
+                    bn = "Да" if bn_flag else "Нет"
+                else:
+                    bn = "?"
                 parts.append(f"{ci['title']}::{di}::{bn}")
             bundle = "; ".join(parts)
 
         rows.append({
             "ключ": kw,
-            "конкурент": comp_url,
+            "конкурент": comp_title,
+            "конкурент_url": comp_url,
+            "конкурент_app_id": comp_app_id,
             "Юзаный": "Да" if any_brand_in_title(kw, keyapp_titles) else "Нет",
             "страна": country_title,
-            "installs_daily": comp_daily,
-            "конкурент_забанен": "Да" if comp_banned else "Нет",
+            "инстайлы в день": comp_daily,
+            "конкурент в бане": ("Да" if comp_banned is True else "Нет" if comp_banned is False else ""),
             "конкуренты_инсталлы": bundle
         })
 
