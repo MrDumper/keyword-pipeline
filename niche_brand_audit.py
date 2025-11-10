@@ -69,19 +69,35 @@ def _expired(ts_iso: str, ttl_days: int) -> bool:
 def play_search_cached(query, lang, cc, topn, ttl_days):
     key = hashlib.md5(f"{query}|{lang}|{cc}|{topn}".encode()).hexdigest()
     rec = play_cache.get(key)
-    if rec and not _expired(rec["ts"], ttl_days):
-        return rec["data"]
+    if isinstance(rec, dict) and not _expired(rec.get("ts", ""), ttl_days):
+        data = rec.get("data")
+        if isinstance(data, list) and data:
+            return data
+        # пустые ответы ([], None) не кэшируем — мог быть сетевой сбой
+        play_cache.pop(key, None)
+
     data = play_search_candidates(query, lang, cc, topn)
-    play_cache[key] = {"ts": _now().isoformat(), "data": data}
+    if data:
+        play_cache[key] = {"ts": _now().isoformat(), "data": data}
+    else:
+        play_cache.pop(key, None)
     _write_cache("play_search", play_cache)
     return data
 
 def aspy_enrich_cached(app_id, session, ttl_days):
     rec = aspy_cache.get(app_id)
-    if rec and not _expired(rec["ts"], ttl_days):
-        return rec["data"]
+    if isinstance(rec, dict) and not _expired(rec.get("ts", ""), ttl_days):
+        data = rec.get("data")
+        if isinstance(data, dict) and data:
+            return data
+        # некорректная запись — пересчитаем
+        aspy_cache.pop(app_id, None)
+
     data = aspy_enrich(app_id, session)
-    aspy_cache[app_id] = {"ts": _now().isoformat(), "data": data}
+    if data:
+        aspy_cache[app_id] = {"ts": _now().isoformat(), "data": data}
+    else:
+        aspy_cache.pop(app_id, None)
     _write_cache("aspy_meta", aspy_cache)
     return data
 
