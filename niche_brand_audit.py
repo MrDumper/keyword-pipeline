@@ -108,7 +108,8 @@ def _headers_keyapp(token: str) -> Dict[str,str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 def _headers_aspy(api_key: str) -> Dict[str,str]:
-    return {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    """AppstoreSpy now expects the API key in the API-KEY header (see docs)."""
+    return {"API-KEY": api_key, "Accept": "application/json"}
 
 def normalize_text(s: str) -> str:
     s = (s or "").strip().lower()
