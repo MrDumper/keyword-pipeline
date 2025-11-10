@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-from typing import List
+from typing import List, Tuple, Optional
 import pandas as pd
 import unicodedata
 import re
@@ -25,23 +25,33 @@ def _results_path(cc: str) -> str:
     """Путь к CSV объёмов по стране (совместим с br_results.csv / pl_results.csv)."""
     return f"{cc.lower()}_results.csv"
 
-def _canon(country_code: str, s: str) -> str:
+def _canon(country_code: Optional[str], s: str) -> str:
     """Берём канон из каталога, иначе нормализацию."""
-    c = canonicalize(country_code, s)
-    return c if c else _norm_basic(s)
+    if country_code:
+        try:
+            c = canonicalize(country_code, s)
+            if c:
+                return c
+        except KeyError:
+            # если страна вне каталога, падаем в нормализацию
+            pass
+    return _norm_basic(s)
 
 # -------------------- volumes --------------------
 
-def load_volumes(paths: List[str], country_code: str) -> pd.DataFrame:
+def load_volumes(path_country: List[Tuple[str, str]]) -> pd.DataFrame:
     """
     Загружает несколько файлов объёмов, строит 'canon' и берёт максимум объёма по канону.
     Возвращает df ['canon','search_volume'].
     """
     dfs = []
-    for p in paths:
+    for p, cc in path_country:
         try:
             df = pd.read_csv(p)
         except FileNotFoundError:
+            continue
+
+        if "keyword" not in df.columns:
             continue
 
         # coalesce volume столбца
@@ -53,7 +63,7 @@ def load_volumes(paths: List[str], country_code: str) -> pd.DataFrame:
 
         # ключ → canon
         df["keyword"] = df["keyword"].astype(str).str.strip()
-        df["canon"] = df["keyword"].apply(lambda x: _canon(country_code, x))
+        df["canon"] = df["keyword"].apply(lambda x: _canon(cc, x))
         dfs.append(df[["canon", "search_volume"]])
 
     if not dfs:
@@ -96,11 +106,10 @@ def main():
     countries = get_supported_countries() if args.country == "all" else [args.country]
 
     # загрузим объёмы для выбранных стран
-    vol_paths = [_results_path(cc) for cc in countries]
+    vol_paths = [(_results_path(cc), cc) for cc in countries]
     # если какие-то файлы отсутствуют — просто не добавятся
-    # для случая одной страны vol_paths = ['br_results.csv'] / ['pl_results.csv']
-    # country_code для канона: если одна страна — её код; если all — канонизируем по стране аудита (ниже)
-    country_for_canon = countries[0] if len(countries) == 1 else None
+    single_country = len(countries) == 1
+    country_for_canon = countries[0] if single_country else None
 
     # аудит
     audit = pd.read_csv(args.audit)
@@ -129,21 +138,17 @@ def main():
         # несколько стран — канон отдельно по каждой строке в зависимости от страны
         title2cc = {get_country_title(cc): cc for cc in get_supported_countries()}
         audit["canon"] = audit.apply(
-            lambda r: _canon(title2cc.get(r["страна"], "br"), r["ключ"]), axis=1
+            lambda r: _canon(title2cc.get(r["страна"]), r["ключ"]), axis=1
         )
 
     # загрузка объёмов и мердж
-    # если одна страна: объёмы считаем по этой стране
-    # если несколько — объединяем все vol_paths, но в load_volumes нужен country_code для canon;
-    # в таком случае используем 'br' просто для нормалайзера (canon уже посчитан для аудита)
-    vol_country_code = country_for_canon or "br"
-    vol = load_volumes(vol_paths, vol_country_code)
+    vol = load_volumes(vol_paths)
 
     merged = audit.merge(vol, on="canon", how="left")
     merged["search_volume"] = pd.to_numeric(merged.get("search_volume"), errors="coerce").fillna(0)
 
     # базовые фильтры
-    if args.only_nounused:
+    if args.only_nonused:
         merged = merged[merged["Юзаный"].astype(str).str.strip().str.lower().eq("нет")].copy()
 
     has_comp = merged["конкурент"].fillna("-") != "-"
