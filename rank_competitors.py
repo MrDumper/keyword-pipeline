@@ -187,6 +187,7 @@ def main():
 
     if "конкурент" in merged.columns:
         competitor_series = merged["конкурент"].fillna("").astype(str).str.strip()
+        merged["конкурент"] = competitor_series
     else:
         competitor_series = pd.Series([""] * len(merged), index=merged.index)
     has_comp = competitor_series != ""

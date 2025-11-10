@@ -103,7 +103,6 @@ def aspy_enrich_cached(app_id, session, ttl_days):
 
 # AppstoreSpy API
 ASPY_BASE = "https://api.appstorespy.com/v1"
-ASPY_STORES = ("googleplay", "google")
 
 def _headers_keyapp(token: str) -> Dict[str,str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -193,38 +192,50 @@ def play_search_candidates(keyword: str, lang: str, country_cc: str, topn: int, 
 
 # ---------- AppstoreSpy helpers ----------
 
-def _aspy_get_json(session: requests.Session, endpoint: str, app_id: str, extra_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    params = extra_params.copy() if extra_params else {}
-    params.setdefault("app_id", app_id)
-    for store in ASPY_STORES:
-        params["store"] = store
-        try:
-            r = session.get(f"{ASPY_BASE}{endpoint}", params=params, timeout=30)
-        except Exception:
-            continue
+def _aspy_request(
+    session: requests.Session,
+    method: str,
+    endpoint: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Helper for AppstoreSpy requests (v1 API, bearer auth already on the session)."""
 
-        if r.status_code == 429:
-            # превышение лимита — вернём пусто, чтобы не стопорить пайплайн
-            return {}
+    url = f"{ASPY_BASE}{endpoint}"
+    try:
+        r = session.request(method, url, params=params, json=payload, timeout=30)
+    except Exception:
+        return {}
 
-        if r.status_code == 404:
-            # для некоторых регионов store может не работать — пробуем следующий
-            continue
+    if r.status_code in {401, 403}:
+        # неверный ключ — смысла продолжать нет
+        return {}
 
-        if r.status_code == 401:
-            # неверный ключ — не имеет смысла продолжать
-            return {}
+    if r.status_code in {404, 422}:
+        # нет данных по приложению — возвращаем пусто
+        return {}
 
-        if r.ok:
-            try:
-                return r.json() or {}
-            except ValueError:
-                return {}
-    return {}
+    if r.status_code == 429:
+        # превышение лимита — не стопорим пайплайн, просто отдаём пусто
+        return {}
+
+    if not r.ok:
+        return {}
+
+    try:
+        data = r.json()
+    except ValueError:
+        return {}
+
+    # Некоторые эндпоинты (installs_daily) возвращают список, остальные — dict
+    return data or {}
 
 def _extract_daily_installs_any(data: Dict[str, Any]) -> Optional[float]:
     # Пытаемся вынуть daily installs из разных возможных мест
     candidates = [
+        ("ipd",),
+        ("downloads_daily",),
         ("installs_daily",),
         ("daily_installs",),
         ("est_installs_per_day",),
@@ -253,21 +264,28 @@ def _extract_daily_installs_any(data: Dict[str, Any]) -> Optional[float]:
     return None
 
 def _extract_daily_series_any(data: Dict[str, Any]) -> List[float]:
-    series_keys = ["daily_installs","installs_daily","downloads_daily","installs_per_day"]
-    for k in series_keys:
-        if k in data:
-            seq = data[k]
-            if isinstance(seq, list):
-                out = []
-                for v in seq:
-                    if isinstance(v, dict):
-                        v = v.get("value") or v.get("v") or v.get("count")
-                    try:
-                        out.append(float(v))
-                    except Exception:
-                        continue
-                return out
-    return []
+    if isinstance(data, list):
+        seq = data
+    else:
+        seq = None
+        series_keys = ["daily_installs", "installs_daily", "downloads_daily", "installs_per_day"]
+        for k in series_keys:
+            if k in data:
+                seq = data[k]
+                break
+
+    if not isinstance(seq, list):
+        return []
+
+    out = []
+    for v in seq:
+        if isinstance(v, dict):
+            v = v.get("ipd") or v.get("value") or v.get("v") or v.get("count")
+        try:
+            out.append(float(v))
+        except Exception:
+            continue
+    return out
 
 def _extract_banned_flag(data: Dict[str, Any]) -> Optional[bool]:
     """
@@ -282,6 +300,11 @@ def _extract_banned_flag(data: Dict[str, Any]) -> Optional[bool]:
         v = data.get(k)
         if isinstance(v, bool):
             if v: return True
+    # новые ключи API v1
+    for k in ("published", "listing_visible"):
+        v = data.get(k)
+        if isinstance(v, bool):
+            return not v
     # статусные строки
     status = str(data.get("status","")).lower()
     if any(x in status for x in ("banned","removed","suspended","unpublished","deleted","not available","terminated")):
@@ -306,30 +329,47 @@ def aspy_enrich(app_id: str, session: requests.Session) -> Dict[str, Any]:
     """
     out = {"daily": None, "banned": None}
 
-    # 1) summary
-    data = _aspy_get_json(session, "/apps/summary", app_id)
-    if data:
-        out["daily"] = _extract_daily_installs_any(data) if out["daily"] is None else out["daily"]
-        b = _extract_banned_flag(data)
-        if b is not None:
-            out["banned"] = bool(b)
-
-    # 2) app
-    data = _aspy_get_json(session, "/apps/app", app_id)
-    if data:
+    # 1) детальная карточка приложения
+    data = _aspy_request(session, "GET", f"/play/apps/{app_id}")
+    if isinstance(data, dict) and data:
         if out["daily"] is None:
             out["daily"] = _extract_daily_installs_any(data)
         b = _extract_banned_flag(data)
         if b is not None:
             out["banned"] = bool(b)
 
-    # 3) trends (последняя точка)
+    # 2) daily installs (по датам)
     if out["daily"] is None:
-        data = _aspy_get_json(session, "/apps/trends", app_id)
-        if data:
-            seq = _extract_daily_series_any(data)
-            if seq:
-                out["daily"] = float(seq[-1])
+        data = _aspy_request(session, "GET", f"/play/apps/{app_id}/installs_daily")
+        if isinstance(data, list) and data:
+            try:
+                last = next(
+                    (float(item.get("ipd")) for item in reversed(data) if item.get("ipd") is not None),
+                    None,
+                )
+            except Exception:
+                last = None
+            if last is not None:
+                out["daily"] = last
+
+    # 3) fallback: агрегированный поиск по bundle
+    if out["daily"] is None or out["banned"] is None:
+        payload = {"filter": {"bundle": app_id}, "limit": 1}
+        data = _aspy_request(session, "POST", "/play/apps/query", payload=payload)
+        if isinstance(data, dict):
+            items = data.get("data") or data.get("apps") or data.get("items")
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+        if items:
+            node = items[0]
+            if out["daily"] is None:
+                out["daily"] = _extract_daily_installs_any(node)
+            if out["banned"] is None:
+                b = _extract_banned_flag(node)
+                if b is not None:
+                    out["banned"] = bool(b)
 
     return out
 
