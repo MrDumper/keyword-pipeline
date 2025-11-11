@@ -56,6 +56,7 @@ def _base_variants(canon: str) -> List[str]:
 
 # Здесь задаются поддерживаемые страны: язык KeywordTool и Google Ads Location ID.
 COUNTRIES: Dict[str, Dict[str, object]] = {
+    "ar": {"language": "es", "location_id": 2032, "title": "Аргентина"},
     "br": {"language": "pt", "location_id": 2076, "title": "Бразилия"},
     "pl": {"language": "pl", "location_id": 2616, "title": "Польша"},
     # добавляй новые страны здесь (код ISO2 в нижнем регистре):
@@ -78,6 +79,38 @@ def get_country_config(code: str) -> Dict[str, object]:
 # Варианты/синонимы мы генерируем ниже и используем лишь для запросов/маппинга.
 
 CANON_BY_COUNTRY: Dict[str, List[str]] = {
+    "ar": uniq([
+        "Betano","Bet365","Codere","Betsson","bplay","BetWarrior","Jugadón","City Center Online",
+        "Casino Magic Online","Casino Club Online","Casino Buenos Aires Online","Palermo Online","Casino del Río Online",
+        "Casino Santa Fe Online","Casino de Mendoza Online","Casino de Córdoba Online","Casino de Victoria Online",
+        "Casino de Entre Ríos Online","Casino de Misiones Online","Casino de Tucumán Online","Casino de Neuquén Online",
+        "Casino de Río Negro Online","Casino de San Luis Online","Casino de San Juan Online","Casino de Salta Online",
+        "Casino de Chaco Online","Casino de Corrientes Online","Casino de La Pampa Online","Casino de Formosa Online",
+        "Betcris","Rivalo","Betway","Betfair","Pinnacle","Marathonbet","1xBet","1win","22Bet","20Bet",
+        "TonyBet","LeoVegas","Unibet","William Hill","Betfred","Bwin","888sport","888casino","Bodog","Stake",
+        "BC.GAME","N1 Bet","Mostbet","Melbet","Parimatch","10bet","BetVictor","Campeonbet","Librabet","Rabona",
+        "Powbet","FezBet","BetTilt","Megapari","Betobet","GG.BET","Pin-Up","PlayUZU","Vulkan Vegas","SlotV",
+        "Bizzo","Neon54","7Signs","HellSpin","Tsars","1xSlots","Wazamba","BoaBoa","ZetCasino","Casumo",
+        "NetBet","LV BET","Novibet","Betmotion","Spin Casino","Spinamba","Mr Green","Royal Panda","Karamba",
+        "Bet-at-home","Interwetten","BetAmerica","TwinSpires","Tipico","ComeOn","Bethard","BetUK","Grosvenor Casino",
+        "Coral","Ladbrokes","Paddy Power","SBK","PokerStars Sports","PokerStars Casino","PartyCasino","PartyPoker",
+        "BetMGM","Caesars Sportsbook","DraftKings","FanDuel","Sky Bet","SugarHouse","888poker","GGPoker",
+        "WPT Global","Winamax","Coolbet","Betsson Group (StarCasino)","StarCasino","JackpotCity","Royal Vegas",
+        "Spin Sports","EnergyCasino","Mr.Play","Platin Casino","Playamo","Casimba","CasiGo","PlayOJO","Genesis Casino",
+        "Kassu","Spinit","Kroon Casino","Betano Casino","Bet365 Casino","Betway Casino","Codere Casino",
+        "Betsson Casino","bplay Casino","Casino Club","Casino Buenos Aires","Hipódromo Argentino de Palermo",
+        "City Center Rosario","Casino Victoria","Casino Magic Neuquén","Casino Puerto Madero","Casino Trilenium",
+        "Casino Tigre","Casino Pinamar","Casino Bariloche","Casino Cipolletti","Casino Maipú","Casino Godoy Cruz",
+        "Casino Central Mar del Plata","Casino Miramar","Casino Santa Rosa","Casino Resistencia","Casino Posadas",
+        "Casino Iguazú","Casino Salta","Casino Termas de Río Hondo","Casino Catamarca","Casino Ushuaia",
+        "Casino Río Grande","Casino Mendoza Online","Boldt Gaming","Atlántica de Juegos","Alea (Lotería)",
+        "Lotería de la Ciudad (BA CABA Online)","Lotería de la Provincia (Buenos Aires)","BPlay Santa Fe",
+        "BPlay Entre Ríos","BPlay Buenos Aires","Betpoint","Betnacional (LATAM)","Retabet","Suertia","KirolBet",
+        "Codeta","Betboro","Dafabet","12Bet","10CRIC","22Win","1Bet","Stake Originals","Thunderpick","Roobet",
+        "Sportsbet.io","Cloudbet","FortuneJack","mBit Casino","Bitcasino.io","BetFury","Rollbit","BC.Game Casino",
+        "Rubet","Blaze","Betano Argentina","Betway Argentina","Codere Argentina","Betsson Argentina",
+        "bplay Argentina","BetWarrior Argentina","Jugadón Argentina","City Center Online Argentina",
+    ]),
     "br": uniq([
     # Топ/мейнстрим
     "Betano","bet365","Sportingbet","PixBet","Betnacional","Superbet",

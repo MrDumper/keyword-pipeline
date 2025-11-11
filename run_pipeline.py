@@ -4,6 +4,8 @@
 import argparse, json, os, subprocess, sys
 from pathlib import Path
 
+from brands_catalog import get_supported_countries
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "keyword_pipeline" / "keys.json"
 
 def run(cmd: list[str], cwd: Path) -> None:
@@ -70,7 +72,9 @@ def main():
     p.add_argument("--save-keys", action="store_true", help="Сохранить переданные ключи и выйти")
 
     # страна/кап-пакет
-    p.add_argument("--country", choices=["br","pl","all"], default="br")
+    supported = get_supported_countries()
+    default_country = "br" if "br" in supported else (supported[0] if supported else "all")
+    p.add_argument("--country", choices=supported + ["all"], default=default_country)
     p.add_argument("--caps", default="", help="Список капов: 500000,250000,100000,50000,10000,1000")
     p.add_argument("--rank-out", default=None)
 
