@@ -25,6 +25,7 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import requests
 from google_play_scraper import search as gp_search
+from urllib.parse import urljoin
 
 # каталог стран/брендов
 from brands_catalog import (
@@ -124,45 +125,220 @@ def _normalize_tokens(s: str) -> list[str]:
     # токены: буквы/цифры, длиной >= 3
     return [t for t in re.findall(r"[a-z0-9]+", s) if len(t) >= 3]
 
-def any_brand_in_title(brand: str, titles: list[str]) -> bool:
-    """
-    Строгая проверка: разбиваем бренд и тайтл на токены и ищем пересечение токенов.
-    Примеры: 'LV BET' -> {'lv','bet'}; 'bet365' -> {'bet365'}.
-    Совпадение по хотя бы одному токену длиной >= 4 либо по полному тегу (например 'bet365').
-    """
+def _extract_app_records(payload: Any) -> list[dict]:
+    """Keyapp API может возвращать список приложений в разных обёртках — нормализуем."""
+
+    def _flatten(node: dict) -> dict:
+        """Разворачиваем attributes → уровень выше, чтобы можно было доставать title/name."""
+        if not isinstance(node, dict):
+            return {}
+        if "attributes" in node and isinstance(node["attributes"], dict):
+            flat = {k: v for k, v in node.items() if k != "attributes"}
+            flat.update(node["attributes"])
+            node = flat
+        if "relationships" in node and isinstance(node["relationships"], dict):
+            # relationships нас не интересуют — убираем, чтобы не мешали рекурсии ниже
+            node = {k: v for k, v in node.items() if k != "relationships"}
+        return node
+
+    def _dig(node: Any) -> list[dict]:
+        if isinstance(node, list):
+            out: list[dict] = []
+            for item in node:
+                if isinstance(item, dict):
+                    out.append(_flatten(item))
+            return out
+        if isinstance(node, dict):
+            node = _flatten(node)
+            collected: list[dict] = []
+            for key in ("data", "items", "apps", "results"):
+                if key in node:
+                    collected.extend(_dig(node[key]))
+            if not collected:
+                collected.extend([node])
+            return collected
+        return []
+
+    if isinstance(payload, list):
+        return _dig(payload)
+    if isinstance(payload, dict):
+        records: list[dict] = []
+        for key in ("apps", "data", "results", "items"):
+            if key in payload:
+                records.extend(_dig(payload[key]))
+        if not records:
+            records = _dig(payload)
+        return records
+    return []
+
+
+def _resolve_next_page(payload: Any, current_url: str, current_params: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    for candidate in ("next", "next_page_url", "next_page", "next_url"):
+        link = payload.get(candidate)
+        if isinstance(link, str) and link:
+            return link, None
+
+    links = payload.get("links")
+    if isinstance(links, dict):
+        for candidate in ("next", "next_page", "next_page_url"):
+            link = links.get(candidate)
+            if isinstance(link, str) and link:
+                return link, None
+
+    pagination = payload.get("pagination") or payload.get("meta")
+    if isinstance(pagination, dict):
+        # прямые поля: current_page / last_page
+        current = pagination.get("current_page") or pagination.get("page")
+        last = pagination.get("last_page") or pagination.get("total_pages")
+        if isinstance(current, dict):
+            current = current.get("current") or current.get("page") or current.get("number")
+        if isinstance(last, dict):
+            last = last.get("last") or last.get("total") or last.get("pages")
+        if isinstance(current, int) and isinstance(last, int) and current < last:
+            params = dict(current_params or {})
+            key_number = "page[number]" if any(k.startswith("page[") for k in params.keys()) else "page"
+            params[key_number] = current + 1
+            return current_url, params
+        # JSON:API style meta: {"page": {"next": 3}}
+        page_meta = pagination.get("page")
+        if isinstance(page_meta, dict):
+            next_num = page_meta.get("next") or page_meta.get("next_page")
+            if isinstance(next_num, int):
+                params = dict(current_params or {})
+                key_number = "page[number]" if any(k.startswith("page[") for k in params.keys()) else "page"
+                params[key_number] = next_num
+                return current_url, params
+
+    return None
+
+
+def _extract_title(rec: dict) -> str:
+    for key in ("title", "name", "app_title", "store_title", "appName", "appTitle"):
+        val = rec.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    app_node = rec.get("app")
+    if isinstance(app_node, dict):
+        for key in ("title", "name", "app_title", "store_title"):
+            val = app_node.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    attr_node = rec.get("attributes")
+    if isinstance(attr_node, dict):
+        for key in ("title", "name", "app_title", "store_title"):
+            val = attr_node.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def keyapp_fetch_app_titles(
+    base_url: str,
+    token: str,
+    *,
+    per_page: int = 200,
+    max_pages: int = 25,
+    sort: str | None = None,
+) -> List[str]:
+    url = base_url.rstrip("/") + DEFAULT_PATHS["apps"]
+    headers = _headers_keyapp(token)
+    titles: list[str] = []
+    seen_norms: set[str] = set()
+    params: dict[str, Any] | None = {"page[number]": 1, "page[size]": per_page}
+    if sort:
+        params["sort"] = sort
+    visited: set[tuple[str, tuple[tuple[str, Any], ...] | None]] = set()
+
+    for _ in range(max_pages):
+        key = (url, tuple(sorted(params.items())) if params else None)
+        if key in visited:
+            break
+        visited.add(key)
+
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            print(f"⚠️ Keyapp request failed: {exc}")
+            break
+
+        if isinstance(payload, dict) and payload.get("errors"):
+            print(f"⚠️ Keyapp response returned errors: {payload.get('errors')}")
+            break
+
+        records = _extract_app_records(payload)
+        for rec in records:
+            title = _extract_title(rec)
+            if not title:
+                continue
+            norm = normalize_text(title)
+            if norm in seen_norms:
+                continue
+            seen_norms.add(norm)
+            titles.append(title)
+
+        next_step = _resolve_next_page(payload, url, params)
+        if not next_step:
+            break
+        next_url, next_params = next_step
+        if not next_url:
+            break
+        if not next_url.lower().startswith("http"):
+            next_url = urljoin(base_url.rstrip("/") + "/", next_url.lstrip("/"))
+        url = next_url
+        if next_params is not None:
+            params = next_params
+        elif params and "page[number]" in params:
+            # если API вернуло только ссылку, увеличиваем page[number]
+            try:
+                params = dict(params)
+                params["page[number]"] = int(params.get("page[number]", 1)) + 1
+            except Exception:
+                params = None
+        else:
+            params = next_params if next_params is not None else None
+
+    return titles
+
+
+def build_keyapp_title_index(titles: List[str]) -> list[tuple[set[str], str]]:
+    index: list[tuple[set[str], str]] = []
+    seen: set[str] = set()
+    for title in titles:
+        if not title:
+            continue
+        norm = normalize_text(title)
+        tokens = set(_normalize_tokens(title))
+        if not norm and not tokens:
+            continue
+        key = norm or "::".join(sorted(tokens))
+        if key in seen:
+            continue
+        seen.add(key)
+        index.append((tokens, norm))
+    return index
+
+
+def brand_used_in_titles(brand: str, titles_index: list[tuple[set[str], str]]) -> bool:
+    brand_norm = normalize_text(brand)
     b_tokens = _normalize_tokens(brand)
-    # если бренд односложный из 3 букв (типа 'PIN'), не считаем — слишком много ложных попаданий
-    if not b_tokens or (len(b_tokens) == 1 and len(b_tokens[0]) < 4):
+    meaningful_tokens = [t for t in b_tokens if len(t) >= 4]
+
+    if len(b_tokens) == 1 and len(b_tokens[0]) < 4 and not brand_norm:
         return False
 
-    for t in titles:
-        t_tokens = set(_normalize_tokens(t))
-        if not t_tokens:
-            continue
-        # полное совпадение токена (например 'bet365')
-        if any(bt in t_tokens for bt in b_tokens if len(bt) >= 4):
+    for tokens, norm in titles_index:
+        if brand_norm and norm and brand_norm == norm:
             return True
-        # два и более совпавших токена для составных брендов (например {'lv','bet'})
-        inter = t_tokens.intersection(b_tokens)
-        if len(b_tokens) >= 2 and len(inter) >= 2:
+        if meaningful_tokens and any(t in tokens for t in meaningful_tokens):
+            return True
+        if len(b_tokens) >= 2 and len(set(b_tokens).intersection(tokens)) >= 2:
             return True
     return False
-
-def keyapp_fetch_app_titles(base_url: str, token: str) -> List[str]:
-    url = base_url.rstrip("/") + DEFAULT_PATHS["apps"]
-    try:
-        r = requests.get(url, headers=_headers_keyapp(token), timeout=30)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return []
-    arr = data if isinstance(data, list) else (data.get('apps') or data.get('data') or [])
-    titles = []
-    for it in arr:
-        t = it.get('title') or it.get('name') or it.get('app_title') or it.get('store_title') or it.get('appName')
-        if t:
-            titles.append(str(t))
-    return titles
 
 # ---------- Google Play ----------
 
@@ -378,7 +554,7 @@ def aspy_enrich(app_id: str, session: requests.Session) -> Dict[str, Any]:
 
 def audit_country_all_brands(
     country_code: str,
-    keyapp_titles: List[str],
+    keyapp_titles_index: list[tuple[set[str], str]],
     aspy_key: Optional[str],
     topn: int,
     play_sleep: float,
@@ -444,7 +620,7 @@ def audit_country_all_brands(
             "конкурент": comp_title,
             "конкурент_url": comp_url,
             "конкурент_app_id": comp_app_id,
-            "Юзаный": "Да" if any_brand_in_title(kw, keyapp_titles) else "Нет",
+            "Юзаный": "Да" if brand_used_in_titles(kw, keyapp_titles_index) else "Нет",
             "страна": country_title,
             "инстайлы в день": comp_daily,
             "конкурент в бане": ("Да" if comp_banned is True else "Нет" if comp_banned is False else ""),
@@ -469,7 +645,9 @@ def main():
                     help="TTL кэша для AppstoreSpy/Play (дни)")
     args = ap.parse_args()
 
-    titles = keyapp_fetch_app_titles(args.base_url, args.api_key)
+    titles = keyapp_fetch_app_titles(args.base_url, args.api_key, sort="-updated_at")
+    print(f"ℹ️ Keyapp titles fetched: {len(titles)}")
+    keyapp_index = build_keyapp_title_index(titles)
     countries = get_supported_countries() if args.country == "all" else [args.country]
 
     frames = []
@@ -477,7 +655,7 @@ def main():
         frames.append(
             audit_country_all_brands(
                 country_code=cc,
-                keyapp_titles=titles,
+                keyapp_titles_index=keyapp_index,
                 aspy_key=args.appstorespy_key,
                 topn=args.topn,
                 play_sleep=args.play_sleep,

@@ -4,6 +4,8 @@
 import argparse, json, os, subprocess, sys
 from pathlib import Path
 
+from brands_catalog import get_supported_countries
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "keyword_pipeline" / "keys.json"
 
 def run(cmd: list[str], cwd: Path) -> None:
@@ -70,7 +72,9 @@ def main():
     p.add_argument("--save-keys", action="store_true", help="Сохранить переданные ключи и выйти")
 
     # страна/кап-пакет
-    p.add_argument("--country", choices=["br","pl","all"], default="br")
+    supported = get_supported_countries()
+    default_country = "br" if "br" in supported else (supported[0] if supported else "all")
+    p.add_argument("--country", choices=supported + ["all"], default=default_country)
     p.add_argument("--caps", default="", help="Список капов: 500000,250000,100000,50000,10000,1000")
     p.add_argument("--rank-out", default=None)
 
@@ -103,7 +107,9 @@ def main():
     p.add_argument("--rank-script",  default="rank_competitors.py")
 
     p.add_argument("--only-nonused", action="store_true",
-                   help="В финальном CSV оставить только неюзанные бренды")
+                   help="(устарело) Явно оставить только неюзанные бренды")
+    p.add_argument("--include-used", action="store_true",
+                   help="Не фильтровать бренды, которые уже есть в Keyapp (по умолчанию скрываем их)")
 
     args = p.parse_args()
     cwd = Path.cwd()
@@ -164,6 +170,11 @@ def main():
 
     # 2) rank — пакет капов
     caps = str2caps(args.caps)
+    filter_nonused = True
+    if getattr(args, "include_used", False):
+        filter_nonused = False
+    if getattr(args, "only_nonused", False):
+        filter_nonused = True
     if not caps:
         out_file = outname(args.country, None, args.rank_out)
         rank_cmd = [
@@ -178,7 +189,7 @@ def main():
             rank_cmd += ["--cap-lower", str(args.cap_lower)]
         if args.only_with_competitor:
             rank_cmd.append("--only-with-competitor")
-        if getattr(args, "only_nonused", False):
+        if filter_nonused:
             rank_cmd.append("--only-nonused")
         if args.top_per_country is not None:
             rank_cmd += ["--top-per-country", str(args.top_per_country)]
@@ -201,6 +212,8 @@ def main():
             rank_cmd += ["--cap-lower", str(args.cap_lower)]
         if args.only_with_competitor:
             rank_cmd.append("--only-with-competitor")
+        if filter_nonused:
+            rank_cmd.append("--only-nonused")
         if args.top_per_country is not None:
             rank_cmd += ["--top-per-country", str(args.top_per_country)]
         run(rank_cmd, cwd)
